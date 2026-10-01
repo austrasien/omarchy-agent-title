@@ -14,6 +14,11 @@ QUERY_RE = re.compile(
     r"<user_query>\s*(.*?)\s*</user_query>",
     re.DOTALL,
 )
+CONV_UUID_RE = re.compile(
+    r"(?:/cursor/chats/[^/]+/|/agent-transcripts/)"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.I,
+)
 HZ = os.sysconf("SC_CLK_TCK")
 
 
@@ -85,57 +90,96 @@ def transcripts_dir_for(cwd: Path) -> Path:
     return Path.home() / ".cursor" / "projects" / slug / "agent-transcripts"
 
 
-# Folder ctime vs process start. Sessions older than this still match:
-# ctime is creation time, not "how long the chat has been open".
-MATCH_SLACK_S = 180.0
+def conversation_id_for(foot_pid: int) -> str | None:
+    """UUID of the chat this Foot window actually has open.
+
+    cursor-agent keeps ~/.config/cursor/chats/<hash>/<uuid>/store.db in its
+    fd table. Tool children also export CURSOR_CONVERSATION_ID. Prefer that
+    over mtime: several CLIs share one transcripts dir, and the window that
+    is currently streaming always looks like the "latest" JSONL.
+    """
+    ordered: list[int] = []
+    for pid in descendants(foot_pid):
+        cmd = cmdline(pid)
+        if "screenlook" in cmd or "hypruse" in cmd:
+            continue
+        if "cursor-agent" in cmd:
+            ordered.insert(0, pid)
+        else:
+            ordered.append(pid)
+    for pid in ordered:
+        fd_dir = Path(f"/proc/{pid}/fd")
+        try:
+            for entry in fd_dir.iterdir():
+                try:
+                    target = os.readlink(entry)
+                except OSError:
+                    continue
+                match = CONV_UUID_RE.search(target)
+                if match:
+                    return match.group(1).lower()
+        except OSError:
+            pass
+        try:
+            env = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            continue
+        for item in env.split(b"\0"):
+            if not item.startswith(b"CURSOR_CONVERSATION_ID="):
+                continue
+            val = item.split(b"=", 1)[1].decode("ascii", "replace").strip().lower()
+            if val:
+                return val
+    return None
+
+
+def jsonl_for_id(tdir: Path, conv_id: str) -> Path | None:
+    path = tdir / conv_id / f"{conv_id}.jsonl"
+    return path if path.is_file() else None
 
 
 def assign_jsonls(windows: list[dict]) -> dict[str, Path]:
-    """One JSONL per window. Closest transcript-dir ctime to agent start wins."""
+    """One JSONL per live CLI window.
+
+    Prefer the conversation UUID from cursor-agent's open files. Only then
+    fall back to newest-window / latest-mtime: /resume reuses an older
+    transcript, and the first JSONL after Foot start is often another chat.
+    """
+    assigned: dict[str, Path] = {}
     by_dir: dict[Path, list[dict]] = {}
     for win in windows:
         by_dir.setdefault(win["tdir"], []).append(win)
-
-    assigned: dict[str, Path] = {}
     for tdir, group in by_dir.items():
-        jsonls = list(tdir.glob("*/*.jsonl"))
-        pairs: list[tuple[float, str, Path]] = []
+        unused = set(tdir.glob("*/*.jsonl"))
         for win in group:
-            start = win["start"]
-            if start is None:
+            conv_id = win.get("conv_id")
+            if not conv_id:
                 continue
-            for path in jsonls:
-                dt = path.parent.stat().st_ctime - start
-                if dt < -5 or dt > MATCH_SLACK_S:
-                    continue
-                pairs.append((abs(dt), win["address"], path))
-        pairs.sort()
-        used_addr: set[str] = set()
-        used_path: set[Path] = set()
-        for _score, address, path in pairs:
-            if address in used_addr or path in used_path:
+            path = jsonl_for_id(tdir, str(conv_id))
+            if path is None or path not in unused:
                 continue
-            used_addr.add(address)
-            used_path.add(path)
-            assigned[address] = path
-
-        # --resume: folder ctime is the original session, not this Foot.
-        unmatched = [w for w in group if w["address"] not in used_addr]
-        unused = [p for p in jsonls if p not in used_path]
-        unmatched.sort(key=lambda w: w["start"] or 0, reverse=True)
-        for win in unmatched:
+            assigned[win["address"]] = path
+            unused.discard(path)
+        ordered = sorted(
+            (w for w in group if w["address"] not in assigned),
+            key=lambda w: w["start"] or 0,
+            reverse=True,
+        )
+        for win in ordered:
             start = win["start"]
             candidates: list[tuple[float, Path]] = []
             for path in unused:
-                mt = path.stat().st_mtime
+                try:
+                    mt = path.stat().st_mtime
+                except OSError:
+                    continue
                 if start is not None and mt < start - 5:
                     continue
-                candidates.append((-mt, path))
+                candidates.append((mt, path))
             if not candidates:
                 continue
-            candidates.sort()
-            path = candidates[0][1]
-            unused.remove(path)
+            path = max(candidates)[1]
+            unused.discard(path)
             assigned[win["address"]] = path
     return assigned
 
@@ -315,7 +359,14 @@ def windows_from_hypr() -> list[dict]:
         if not tdir.is_dir():
             continue
         start = proc_start(agent_pid) if agent_pid else proc_start(foot_pid)
-        windows.append({"address": address, "tdir": tdir, "start": start})
+        windows.append(
+            {
+                "address": address,
+                "tdir": tdir,
+                "start": start,
+                "conv_id": conversation_id_for(foot_pid),
+            }
+        )
     return windows
 
 

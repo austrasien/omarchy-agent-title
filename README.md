@@ -42,7 +42,7 @@ Omarchy launches Cursor CLI in Foot with class `org.omarchy.agent`. The TUI is z
 - Click the bar to focus that window.
 
 ### 💬 Last `<user_query>`
-- `last-query.py` maps each Foot PID → `cursor-agent` cwd → JSONL under `~/.cursor/projects/…/agent-transcripts`.
+- `last-query.py` maps each Foot window to the conversation UUID `cursor-agent` has open (`store.db`), then the matching JSONL. A streaming CLI no longer steals another window’s last query.
 - Poll every 2 s; also on `windowtitlev2`.
 - Cache: `~/.local/state/omarchy/agent-title/queries.json`.
 
