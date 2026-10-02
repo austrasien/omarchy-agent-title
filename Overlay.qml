@@ -162,6 +162,34 @@ Item {
     return Number(r[1]) || 0
   }
 
+  function visibleWorkspaceIds() {
+    var ids = ({})
+    var mons = Hyprland.monitors && Hyprland.monitors.values
+    if (!mons)
+      return ids
+    for (var i = 0; i < mons.length; i++) {
+      var aw = mons[i] && mons[i].activeWorkspace
+      if (aw)
+        ids[Number(aw.id)] = true
+    }
+    return ids
+  }
+
+  function workspaceIsVisible(ws, mon) {
+    if (!ws)
+      return false
+    var vis = overlayRoot.visibleWorkspaceIds()
+    if (vis[Number(ws.id)])
+      return true
+    if (mon && mon.activeWorkspace && Number(mon.activeWorkspace.id) === Number(ws.id))
+      return true
+    return false
+  }
+
+  function tileGeomKey(tile) {
+    return Math.round(Number(tile.localX) || 0) + ":" + Math.round(Number(tile.localY) || 0) + ":" + Math.round(Number(tile.winW) || 0) + ":" + String(tile.monitorName || "")
+  }
+
   function collect() {
     var out = []
     var workspaces = Hyprland.workspaces.values
@@ -170,13 +198,16 @@ Item {
       if (ws.id <= 0)
         continue
       var mon = ws.monitor
-      if (!mon || !mon.activeWorkspace || mon.activeWorkspace.id !== ws.id)
+      if (!overlayRoot.workspaceIsVisible(ws, mon))
+        continue
+      if (!mon)
         continue
       var toplevels = ws.toplevels.values
       for (var j = 0; j < toplevels.length; j++) {
         var tl = toplevels[j]
         var ipc = tl.lastIpcObject || {}
-        if (ipc["class"] !== "org.omarchy.agent")
+        var winClass = ipc["class"] || ""
+        if (winClass !== "org.omarchy.agent" && winClass !== "org.omarchy.agent.forge")
           continue
         if (ipc.hidden === true)
           continue
@@ -193,7 +224,7 @@ Item {
         var topPad = overlayRoot.reservedTop(mon)
         if (y < topPad)
           y += topPad
-        out.push({
+        var tile = {
           address: address,
           pid: pid,
           title: overlayRoot.displayTitle(rawTitle),
@@ -206,9 +237,11 @@ Item {
           winW: size[0],
           monitorName: String(mon.name || ""),
           focused: Hyprland.activeToplevel === tl,
-          accentHex: overlayRoot.accentHex,
+          accentHex: winClass === "org.omarchy.agent.forge" ? "#cba6f7" : overlayRoot.accentHex,
           fgHex: overlayRoot.fgHex
-        })
+        }
+        tile.geomKey = overlayRoot.tileGeomKey(tile)
+        out.push(tile)
       }
     }
     return out
@@ -233,16 +266,20 @@ Item {
         windows.append(tile)
         continue
       }
+      // PanelWindow / layer-shell keeps the mapped size. Changing
+      // implicitWidth does not shrink the surface, so the bar stays as a
+      // ghost over the sibling tile after a split. Recreate it.
+      if (windows.get(idx).geomKey !== tile.geomKey) {
+        windows.remove(idx)
+        windows.insert(idx, tile)
+        continue
+      }
       windows.setProperty(idx, "pid", tile.pid)
       windows.setProperty(idx, "title", tile.title)
       windows.setProperty(idx, "lastQuery", tile.lastQuery)
       windows.setProperty(idx, "lastResponseAt", tile.lastResponseAt)
       windows.setProperty(idx, "waitingForPrompt", tile.waitingForPrompt)
       windows.setProperty(idx, "titleBusy", tile.titleBusy)
-      windows.setProperty(idx, "localX", tile.localX)
-      windows.setProperty(idx, "localY", tile.localY)
-      windows.setProperty(idx, "winW", tile.winW)
-      windows.setProperty(idx, "monitorName", tile.monitorName)
       windows.setProperty(idx, "focused", tile.focused)
       windows.setProperty(idx, "accentHex", tile.accentHex)
       windows.setProperty(idx, "fgHex", tile.fgHex)
@@ -290,26 +327,13 @@ Item {
     target: Hyprland
     function onFocusedWorkspaceChanged() { refreshDebounce.restart() }
     function onRawEvent(event) {
-      switch (event.name) {
-      case "openwindow":
-      case "closewindow":
-      case "movewindow":
-      case "movewindowv2":
-      case "windowtitle":
-      case "windowtitlev2":
-      case "activewindowv2":
-      case "changefloatingmode":
-      case "fullscreen":
-      case "workspace":
-      case "workspacev2":
-      case "focusedmon":
-      case "createworkspacev2":
-      case "destroyworkspacev2":
+      var name = String(event.name || "")
+      if (/window|workspace|fullscreen|monitor|float|configreload/.test(name)) {
         refreshDebounce.restart()
-        if (event.name === "windowtitle" || event.name === "windowtitlev2")
-          queryDebounce.restart()
-        break
+        geomSettle.arm()
       }
+      if (name === "windowtitle" || name === "windowtitlev2")
+        queryDebounce.restart()
     }
   }
 
@@ -319,6 +343,37 @@ Item {
     onTriggered: {
       Hyprland.refreshToplevels()
       syncTimer.restart()
+    }
+  }
+
+  // Split/resize animations finish after openwindow. The first IPC read
+  // still has the old size, then nothing fires. Keep syncing until settle.
+  Timer {
+    id: geomSettle
+    interval: 100
+    repeat: true
+    property int ticksLeft: 0
+    function arm() {
+      ticksLeft = 12
+      running = true
+    }
+    onTriggered: {
+      Hyprland.refreshToplevels()
+      overlayRoot.syncWindows()
+      ticksLeft--
+      if (ticksLeft <= 0)
+        stop()
+    }
+  }
+
+  Timer {
+    id: geomWatch
+    interval: 250
+    running: windows.count > 0
+    repeat: true
+    onTriggered: {
+      Hyprland.refreshToplevels()
+      overlayRoot.syncWindows()
     }
   }
 
@@ -369,6 +424,7 @@ Item {
   Component.onCompleted: {
     Hyprland.refreshToplevels()
     syncTimer.restart()
+    geomSettle.arm()
   }
 
   Instantiator {
@@ -414,6 +470,7 @@ Item {
         anchors.fill: parent
         color: overlayRoot.fillColor
         border.width: 0
+        clip: true
 
         RowLayout {
           id: row

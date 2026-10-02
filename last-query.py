@@ -345,7 +345,7 @@ def main() -> int:
 def windows_from_hypr() -> list[dict]:
     windows: list[dict] = []
     for client in hypr_clients():
-        if client.get("class") != "org.omarchy.agent":
+        if client.get("class") not in ("org.omarchy.agent", "org.omarchy.agent.forge"):
             continue
         address = str(client.get("address") or "")
         try:

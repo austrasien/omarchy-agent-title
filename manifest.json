@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "austraz.agent-title",
   "name": "Agent title",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "austrasien",
   "license": "MIT",
   "description": "Title bar on Cursor CLI windows showing the conversation subject Cursor already puts in the Foot window title.",
