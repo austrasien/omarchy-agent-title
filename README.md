@@ -24,7 +24,7 @@ Got a question, found a bug, or have a suggestion? Open an [**issue**](https://g
 
 ## 🚀 Overview
 
-Omarchy launches Cursor CLI in Foot with class `org.omarchy.agent`. The TUI is zen: no chrome, composer stuck at the bottom. The window title already carries the session name (`/rename`, or Cursor’s auto-name). This plugin reads Hyprland toplevels and draws a thin bar on each visible agent window.
+Omarchy launches Cursor CLI in Foot with class `org.omarchy.agent`, and Cursor Forge CLI with `org.omarchy.agent.forge`. The TUI is zen: no chrome, composer stuck at the bottom. The window title already carries the session name (`/rename`, or Cursor’s auto-name). This plugin reads Hyprland toplevels and draws a thin bar on each visible agent window. Forge titles use Catppuccin mauve `#cba6f7` instead of the current theme accent.
 
 | | Without ❌ | With Agent title ✅ |
 | :--- | :--- | :--- |
@@ -52,6 +52,8 @@ Omarchy launches Cursor CLI in Foot with class `org.omarchy.agent`. The TUI is z
 
 ### 🎨 Theme
 - Fill uses `Color.background`. Title uses `accent`, query uses `foreground`, from the current Omarchy `colors.toml`.
+- **Cursor Forge CLI** (`org.omarchy.agent.forge`): title is always mauve `#cba6f7`, not the theme accent. Last query still uses `foreground`.
+- Forge last-query is read over SSH (`BatchMode`) from transcripts on the remote host.
 
 ## 🛠 Installation (Omarchy)
 

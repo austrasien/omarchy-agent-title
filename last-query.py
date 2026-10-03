@@ -19,7 +19,88 @@ CONV_UUID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
     re.I,
 )
+AGENT_CLASSES = ("org.omarchy.agent", "org.omarchy.agent.forge")
+FORGE_CLASS = "org.omarchy.agent.forge"
+ATTACH_RE = re.compile(r"persist\s+attach\s+['\"]?([^\s'\"]+)")
 HZ = os.sysconf("SC_CLK_TCK")
+_forge_block_until = 0.0
+
+REMOTE_SCAN_PY = r"""
+from pathlib import Path
+import json, re, sys
+
+QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+
+def one_line(text):
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    if len(text) > 300:
+        text = text[:299].rstrip() + "…"
+    return text
+
+def message_text(obj):
+    texts = []
+    for part in (obj.get("message") or {}).get("content") or []:
+        if isinstance(part, dict) and part.get("type") == "text":
+            chunk = (part.get("text") or "").strip()
+            if chunk:
+                texts.append(chunk)
+    return "\n".join(texts).strip()
+
+def scan_jsonl(jsonl):
+    query = ""
+    assistant_key = ""
+    last_role = ""
+    try:
+        lines = jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return "", "", False
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        role = obj.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        if not last_role:
+            last_role = role
+        body = message_text(obj)
+        if role == "user" and not query:
+            match = QUERY_RE.search(body)
+            if match:
+                body = match.group(1).strip()
+            query = one_line(body)
+        elif role == "assistant" and not assistant_key:
+            body = one_line(body)
+            if body:
+                assistant_key = body[:240]
+        if query and assistant_key:
+            break
+    return query, assistant_key, last_role == "assistant"
+
+out = []
+home = Path.home()
+for jsonl in home.glob(".cursor/projects/*/agent-transcripts/*/*.jsonl"):
+    query, assistant_key, last_as = scan_jsonl(jsonl)
+    if not query:
+        continue
+    try:
+        mtime_ms = int(jsonl.stat().st_mtime * 1000)
+    except OSError:
+        continue
+    out.append({
+        "id": jsonl.parent.name,
+        "mtime_ms": mtime_ms,
+        "query": query,
+        "assistantKey": assistant_key,
+        "lastIsAssistant": last_as,
+    })
+print(json.dumps(out, ensure_ascii=False))
+"""
 
 
 def cmdline(pid: int) -> str:
@@ -69,6 +150,106 @@ def proc_start(pid: int) -> float | None:
         return time.time() - uptime + ticks / HZ
     except (OSError, IndexError, ValueError):
         return None
+
+
+def forge_attach_id(foot_pid: int) -> str | None:
+    for pid in descendants(foot_pid):
+        match = ATTACH_RE.search(cmdline(pid))
+        if match:
+            return match.group(1)
+    return None
+
+
+def ssh_forge_catalog() -> list[dict] | None:
+    global _forge_block_until
+    if time.time() < _forge_block_until:
+        return None
+    try:
+        raw = subprocess.check_output(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=2",
+                "forge",
+                "python3",
+                "-u",
+                "-",
+            ],
+            input=REMOTE_SCAN_PY,
+            text=True,
+            timeout=4,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        _forge_block_until = time.time() + 15
+        return None
+    try:
+        data = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def assign_forge(windows: list[dict], catalog: list[dict], prev: dict[str, dict], out: dict[str, dict]) -> None:
+    unused = list(catalog)
+    for win in windows:
+        aid = str(win.get("attach_id") or "")
+        if not aid:
+            continue
+        chosen = None
+        for item in unused:
+            ident = str(item.get("id") or "")
+            if ident == aid or aid in ident:
+                chosen = item
+                break
+        if chosen is None:
+            continue
+        unused.remove(chosen)
+        store(
+            out,
+            win["address"],
+            record_for(
+                win["address"],
+                str(chosen.get("query") or ""),
+                str(chosen.get("assistantKey") or ""),
+                bool(chosen.get("lastIsAssistant")),
+                int(chosen.get("mtime_ms") or 0),
+                prev,
+            ),
+        )
+    leftover = sorted(
+        (w for w in windows if w["address"] not in out and w["address"].lower() not in out),
+        key=lambda w: w["start"] or 0,
+        reverse=True,
+    )
+    unused.sort(key=lambda item: int(item.get("mtime_ms") or 0), reverse=True)
+    for win in leftover:
+        start = win["start"]
+        start_ms = int((start or 0) * 1000)
+        chosen = None
+        for item in unused:
+            mt = int(item.get("mtime_ms") or 0)
+            if start and mt < start_ms - 5000:
+                continue
+            chosen = item
+            break
+        if chosen is None:
+            continue
+        unused.remove(chosen)
+        store(
+            out,
+            win["address"],
+            record_for(
+                win["address"],
+                str(chosen.get("query") or ""),
+                str(chosen.get("assistantKey") or ""),
+                bool(chosen.get("lastIsAssistant")),
+                int(chosen.get("mtime_ms") or 0),
+                prev,
+            ),
+        )
 
 
 def agent_pid_and_cwd(foot_pid: int) -> tuple[int | None, Path | None]:
@@ -327,7 +508,14 @@ def main() -> int:
 
     prev = load_prev(dest)
     out: dict[str, dict] = {}
-    for address, jsonl in assign_jsonls(windows_from_hypr()).items():
+    wins = windows_from_hypr()
+    remote = [w for w in wins if w.get("remote")]
+    local = [w for w in wins if not w.get("remote")]
+    if remote:
+        catalog = ssh_forge_catalog()
+        if catalog:
+            assign_forge(remote, catalog, prev, out)
+    for address, jsonl in assign_jsonls(local).items():
         query, assistant_key, last_is_assistant = scan_jsonl(jsonl)
         try:
             mtime_ms = int(jsonl.stat().st_mtime * 1000)
@@ -345,12 +533,24 @@ def main() -> int:
 def windows_from_hypr() -> list[dict]:
     windows: list[dict] = []
     for client in hypr_clients():
-        if client.get("class") not in ("org.omarchy.agent", "org.omarchy.agent.forge"):
+        if client.get("class") not in AGENT_CLASSES:
             continue
         address = str(client.get("address") or "")
         try:
             foot_pid = int(client["pid"])
         except (KeyError, TypeError, ValueError):
+            continue
+        if client.get("class") == FORGE_CLASS:
+            windows.append(
+                {
+                    "address": address,
+                    "remote": True,
+                    "attach_id": forge_attach_id(foot_pid),
+                    "start": proc_start(foot_pid),
+                    "tdir": Path("/dev/null"),
+                    "conv_id": None,
+                }
+            )
             continue
         agent_pid, cwd = agent_pid_and_cwd(foot_pid)
         if cwd is None:

@@ -18,6 +18,7 @@ Item {
   property color fillColor: Omarchy.Color.background
   // Instantiator delegates cannot reliably bind Color.* ; pass hex on the model.
   property string accentHex: "#e68e0d"
+  readonly property string forgeAccentHex: "#cba6f7"
   property string fgHex: "#bebebe"
   property var queryByAddress: ({})
   property double nowMs: Date.now()
@@ -146,11 +147,24 @@ Item {
     onFileChanged: reload()
   }
 
-  function displayTitle(raw) {
+  function isAgentClass(winClass) {
+    var c = String(winClass || "")
+    return c === "org.omarchy.agent" || c === "org.omarchy.agent.forge"
+  }
+
+  function isForgeClass(winClass) {
+    return String(winClass || "") === "org.omarchy.agent.forge"
+  }
+
+  function accentForClass(winClass) {
+    return overlayRoot.isForgeClass(winClass) ? overlayRoot.forgeAccentHex : overlayRoot.accentHex
+  }
+
+  function displayTitle(raw, winClass) {
     var t = String(raw || "").replace(/^\s+|\s+$/g, "")
     t = t.replace(/^(Working…|Working\.\.\.|Waiting for you|Waiting for confirmation|Ready)\s*[|–—-]\s*/i, "")
     if (!t || t.toLowerCase() === "foot")
-      return "Cursor CLI"
+      return overlayRoot.isForgeClass(winClass) ? "Cursor Forge" : "Cursor CLI"
     return t
   }
 
@@ -206,8 +220,8 @@ Item {
       for (var j = 0; j < toplevels.length; j++) {
         var tl = toplevels[j]
         var ipc = tl.lastIpcObject || {}
-        var winClass = ipc["class"] || ""
-        if (winClass !== "org.omarchy.agent" && winClass !== "org.omarchy.agent.forge")
+        var winClass = String(ipc["class"] || ipc["initialClass"] || "")
+        if (!overlayRoot.isAgentClass(winClass))
           continue
         if (ipc.hidden === true)
           continue
@@ -224,10 +238,11 @@ Item {
         var topPad = overlayRoot.reservedTop(mon)
         if (y < topPad)
           y += topPad
+        var forge = overlayRoot.isForgeClass(winClass)
         var tile = {
           address: address,
           pid: pid,
-          title: overlayRoot.displayTitle(rawTitle),
+          title: overlayRoot.displayTitle(rawTitle, winClass),
           titleBusy: overlayRoot.conversationBusy(rawTitle),
           lastQuery: overlayRoot.queryFor(address),
           lastResponseAt: overlayRoot.responseAtFor(address),
@@ -237,7 +252,8 @@ Item {
           winW: size[0],
           monitorName: String(mon.name || ""),
           focused: Hyprland.activeToplevel === tl,
-          accentHex: winClass === "org.omarchy.agent.forge" ? "#cba6f7" : overlayRoot.accentHex,
+          isForge: forge,
+          accentHex: overlayRoot.accentForClass(winClass),
           fgHex: overlayRoot.fgHex
         }
         tile.geomKey = overlayRoot.tileGeomKey(tile)
@@ -281,6 +297,7 @@ Item {
       windows.setProperty(idx, "waitingForPrompt", tile.waitingForPrompt)
       windows.setProperty(idx, "titleBusy", tile.titleBusy)
       windows.setProperty(idx, "focused", tile.focused)
+      windows.setProperty(idx, "isForge", tile.isForge)
       windows.setProperty(idx, "accentHex", tile.accentHex)
       windows.setProperty(idx, "fgHex", tile.fgHex)
     }
@@ -315,8 +332,10 @@ Item {
   }
 
   onAccentHexChanged: {
-    for (var i = 0; i < windows.count; i++)
-      windows.setProperty(i, "accentHex", overlayRoot.accentHex)
+    for (var i = 0; i < windows.count; i++) {
+      var forge = windows.get(i).isForge === true
+      windows.setProperty(i, "accentHex", forge ? overlayRoot.forgeAccentHex : overlayRoot.accentHex)
+    }
   }
   onFgHexChanged: {
     for (var i = 0; i < windows.count; i++)
@@ -444,6 +463,7 @@ Item {
       required property real winW
       required property string monitorName
       required property bool focused
+      required property bool isForge
       required property string accentHex
       required property string fgHex
 
