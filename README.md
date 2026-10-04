@@ -96,6 +96,10 @@ omarchy plugin remove austraz.agent-title
 
 If the overlay vanishes after `omarchy restart shell`: `omarchy-shell shell rescanPlugins`, then check the layer `austraz-agent-title` (`hyprctl layers`).
 
+### Ghost bar on the wallpaper
+
+A layer-shell overlay is not tied to a Hyprland workspace. v1.2.1 unmaps it as soon as you leave the CLI tile (`visible: false` before destroy), skips stale `at` above the exclusive zone, and ignores unmapped / `visible: false` clients. If a 22 px strip still sits on the wallpaper after a workspace switch, `omarchy restart shell`.
+
 ## ⚖️ License
 
 Licensed under the **MIT License**.

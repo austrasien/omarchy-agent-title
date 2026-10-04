@@ -21,7 +21,9 @@ Item {
   readonly property string forgeAccentHex: "#cba6f7"
   property string fgHex: "#bebebe"
   property var queryByAddress: ({})
+  property var liveVisibleAddresses: ({})
   property double nowMs: Date.now()
+  readonly property int barExclusiveFallback: 30
   readonly property string homeDir: Quickshell.env("HOME") || ""
   readonly property string lastQueryBin: homeDir + "/.config/omarchy/plugins/austraz.agent-title/last-query.py"
   readonly property string queryFile: (Quickshell.env("XDG_STATE_HOME") || (homeDir + "/.local/state")) + "/omarchy/agent-title/queries.json"
@@ -168,12 +170,25 @@ Item {
     return t
   }
 
+  function monitorHasSpecial(mon) {
+    var ipc = mon && mon.lastIpcObject
+    var sp = ipc && ipc.specialWorkspace
+    if (!sp)
+      return false
+    if (Number(sp.id) !== 0)
+      return true
+    return String(sp.name || "") !== ""
+  }
+
   function reservedTop(mon) {
     var ipc = mon && mon.lastIpcObject
     var r = ipc && ipc.reserved
-    if (!r || r.length < 2)
-      return 0
-    return Number(r[1]) || 0
+    var n = 0
+    if (r && r.length >= 2)
+      n = Number(r[1]) || 0
+    if (n > 0)
+      return n
+    return overlayRoot.barExclusiveFallback
   }
 
   function visibleWorkspaceIds() {
@@ -181,10 +196,17 @@ Item {
     var mons = Hyprland.monitors && Hyprland.monitors.values
     if (!mons)
       return ids
+    var fw = Hyprland.focusedWorkspace
+    var focusedMonName = fw && fw.monitor ? String(fw.monitor.name || "") : ""
+    var focusedId = fw ? Number(fw.id) : 0
     for (var i = 0; i < mons.length; i++) {
-      var aw = mons[i] && mons[i].activeWorkspace
-      if (aw)
-        ids[Number(aw.id)] = true
+      var mon = mons[i]
+      if (!mon)
+        continue
+      if (focusedMonName !== "" && String(mon.name || "") === focusedMonName && focusedId)
+        ids[focusedId] = true
+      else if (mon.activeWorkspace)
+        ids[Number(mon.activeWorkspace.id)] = true
     }
     return ids
   }
@@ -192,12 +214,27 @@ Item {
   function workspaceIsVisible(ws, mon) {
     if (!ws)
       return false
+    return !!overlayRoot.visibleWorkspaceIds()[Number(ws.id)]
+  }
+
+  function publishLive(next) {
+    var live = ({})
+    for (var i = 0; i < next.length; i++)
+      live[next[i].address] = true
+    overlayRoot.liveVisibleAddresses = live
+  }
+
+  function hideAllBars() {
+    overlayRoot.liveVisibleAddresses = ({})
+  }
+
+  function dropOffscreenWindows() {
     var vis = overlayRoot.visibleWorkspaceIds()
-    if (vis[Number(ws.id)])
-      return true
-    if (mon && mon.activeWorkspace && Number(mon.activeWorkspace.id) === Number(ws.id))
-      return true
-    return false
+    for (var j = windows.count - 1; j >= 0; j--) {
+      var wsId = Number(windows.get(j).wsId) || 0
+      if (!vis[wsId])
+        windows.remove(j)
+    }
   }
 
   function tileGeomKey(tile) {
@@ -216,6 +253,8 @@ Item {
         continue
       if (!mon)
         continue
+      if (overlayRoot.monitorHasSpecial(mon))
+        continue
       var toplevels = ws.toplevels.values
       for (var j = 0; j < toplevels.length; j++) {
         var tl = toplevels[j]
@@ -224,6 +263,10 @@ Item {
         if (!overlayRoot.isAgentClass(winClass))
           continue
         if (ipc.hidden === true)
+          continue
+        if (ipc.mapped === false)
+          continue
+        if (ipc.visible === false)
           continue
         var at = ipc.at
         var size = ipc.size
@@ -236,12 +279,23 @@ Item {
         var pid = Number(ipc.pid) || 0
         var y = at[1] - mon.y
         var topPad = overlayRoot.reservedTop(mon)
-        if (y < topPad)
-          y += topPad
+        var fullscreen = Number(ipc.fullscreen) || 0
+        if (fullscreen)
+          y = topPad
+        else if (y < topPad) {
+          // Tiled windows sit below the exclusive zone. A y above it is
+          // stale IPC during unmap / workspace switch — adding topPad
+          // parked a ghost bar on the wallpaper (and on omarchy-bar).
+          if (ipc.floating === true)
+            y = topPad
+          else
+            continue
+        }
         var forge = overlayRoot.isForgeClass(winClass)
         var tile = {
           address: address,
           pid: pid,
+          wsId: Number(ws.id) || 0,
           title: overlayRoot.displayTitle(rawTitle, winClass),
           titleBusy: overlayRoot.conversationBusy(rawTitle),
           lastQuery: overlayRoot.queryFor(address),
@@ -273,6 +327,7 @@ Item {
 
   function syncWindows() {
     var next = overlayRoot.collect()
+    overlayRoot.publishLive(next)
     var seen = ({})
     for (var i = 0; i < next.length; i++) {
       var tile = next[i]
@@ -291,6 +346,7 @@ Item {
         continue
       }
       windows.setProperty(idx, "pid", tile.pid)
+      windows.setProperty(idx, "wsId", tile.wsId)
       windows.setProperty(idx, "title", tile.title)
       windows.setProperty(idx, "lastQuery", tile.lastQuery)
       windows.setProperty(idx, "lastResponseAt", tile.lastResponseAt)
@@ -344,10 +400,27 @@ Item {
 
   Connections {
     target: Hyprland
-    function onFocusedWorkspaceChanged() { refreshDebounce.restart() }
+    function onFocusedWorkspaceChanged() {
+      overlayRoot.hideAllBars()
+      overlayRoot.dropOffscreenWindows()
+      refreshDebounce.restart()
+      geomSettle.arm()
+    }
     function onRawEvent(event) {
       var name = String(event.name || "")
-      if (/window|workspace|fullscreen|monitor|float|configreload/.test(name)) {
+      if (/^workspace|focusedmon|activespecial|togglespecial/.test(name)) {
+        overlayRoot.hideAllBars()
+        overlayRoot.dropOffscreenWindows()
+        refreshDebounce.restart()
+        geomSettle.arm()
+        return
+      }
+      if (name === "closewindow" || name === "closewindowv2") {
+        Hyprland.refreshToplevels()
+        overlayRoot.syncWindows()
+        return
+      }
+      if (/window|fullscreen|monitor|float|configreload/.test(name)) {
         refreshDebounce.restart()
         geomSettle.arm()
       }
@@ -452,6 +525,7 @@ Item {
     delegate: PanelWindow {
       id: bar
       required property string address
+      required property int wsId
       required property string title
       required property string lastQuery
       required property double lastResponseAt
@@ -468,7 +542,9 @@ Item {
       required property string fgHex
 
       screen: overlayRoot.pickScreen(monitorName)
-      visible: true
+      // Bind the dict, not a helper: QML will not re-run addressOnScreen()
+      // when liveVisibleAddresses is replaced.
+      visible: overlayRoot.liveVisibleAddresses[address] === true
       color: "transparent"
       implicitWidth: Math.max(1, Math.round(winW))
       implicitHeight: overlayRoot.barHeight
