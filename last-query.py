@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Map each Cursor CLI Foot window to its last <user_query> (JSONL)."""
+"""Map each agent Foot window to its last user query (Cursor / Forge / Pi JSONL)."""
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 QUERY_RE = re.compile(
@@ -19,8 +20,17 @@ CONV_UUID_RE = re.compile(
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
     re.I,
 )
-AGENT_CLASSES = ("org.omarchy.agent", "org.omarchy.agent.forge")
+# Pi session files: 2026-10-07T10-48-14-443Z_<id>.jsonl (UTC, colons → dashes)
+PI_SESSION_TS_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_"
+)
+AGENT_CLASSES = (
+    "org.omarchy.agent",
+    "org.omarchy.agent.forge",
+    "org.omarchy.agent.pi",
+)
 FORGE_CLASS = "org.omarchy.agent.forge"
+PI_CLASS = "org.omarchy.agent.pi"
 ATTACH_RE = re.compile(r"persist\s+attach\s+['\"]?([^\s'\"]+)")
 HZ = os.sysconf("SC_CLK_TCK")
 _forge_block_until = 0.0
@@ -266,9 +276,42 @@ def agent_pid_and_cwd(foot_pid: int) -> tuple[int | None, Path | None]:
     return None, None
 
 
+def is_pi_cmd(cmd: str) -> bool:
+    if not cmd or "screenlook" in cmd or "hypruse" in cmd:
+        return False
+    exe = cmd.strip().split(None, 1)[0]
+    return Path(exe).name == "pi"
+
+
+def pi_pid_and_cwd(foot_pid: int) -> tuple[int | None, Path | None]:
+    for pid in descendants(foot_pid):
+        cmd = cmdline(pid)
+        if not is_pi_cmd(cmd):
+            continue
+        try:
+            return pid, Path(f"/proc/{pid}/cwd").resolve()
+        except OSError:
+            continue
+    return None, None
+
+
 def transcripts_dir_for(cwd: Path) -> Path:
     slug = str(cwd.resolve()).lstrip("/").replace("/", "-")
     return Path.home() / ".cursor" / "projects" / slug / "agent-transcripts"
+
+
+def pi_sessions_dir_for(cwd: Path) -> Path:
+    # /home/foo/bar → --home-foo-bar--
+    slug = "--" + str(cwd.resolve()).lstrip("/").replace("/", "-") + "--"
+    return Path.home() / ".pi" / "agent" / "sessions" / slug
+
+
+def pi_session_created(path: Path) -> float | None:
+    match = PI_SESSION_TS_RE.match(path.name)
+    if not match:
+        return None
+    y, mo, d, h, mi, s, ms = (int(g) for g in match.groups())
+    return datetime(y, mo, d, h, mi, s, ms * 1000, tzinfo=timezone.utc).timestamp()
 
 
 def conversation_id_for(foot_pid: int) -> str | None:
@@ -319,28 +362,59 @@ def jsonl_for_id(tdir: Path, conv_id: str) -> Path | None:
     return path if path.is_file() else None
 
 
+def list_jsonls(tdir: Path, layout: str) -> set[Path]:
+    if layout == "flat":
+        return set(tdir.glob("*.jsonl"))
+    return set(tdir.glob("*/*.jsonl"))
+
+
 def assign_jsonls(windows: list[dict]) -> dict[str, Path]:
     """One JSONL per live CLI window.
 
-    Prefer the conversation UUID from cursor-agent's open files. Only then
-    fall back to newest-window / latest-mtime: /resume reuses an older
-    transcript, and the first JSONL after Foot start is often another chat.
+    Cursor: prefer the conversation UUID from cursor-agent's open files.
+    Pi: prefer session filename timestamp ≈ process start (new session).
+    Then newest-window / latest-mtime: /resume reuses an older transcript.
     """
     assigned: dict[str, Path] = {}
-    by_dir: dict[Path, list[dict]] = {}
+    by_dir: dict[tuple[Path, str], list[dict]] = {}
     for win in windows:
-        by_dir.setdefault(win["tdir"], []).append(win)
-    for tdir, group in by_dir.items():
-        unused = set(tdir.glob("*/*.jsonl"))
+        layout = str(win.get("layout") or "nested")
+        by_dir.setdefault((win["tdir"], layout), []).append(win)
+    for (tdir, layout), group in by_dir.items():
+        unused = list_jsonls(tdir, layout)
         for win in group:
             conv_id = win.get("conv_id")
-            if not conv_id:
+            if not conv_id or layout != "nested":
                 continue
             path = jsonl_for_id(tdir, str(conv_id))
             if path is None or path not in unused:
                 continue
             assigned[win["address"]] = path
             unused.discard(path)
+        # Pi: filename UTC stamp is the session birth time ≈ `pi` start.
+        if layout == "flat":
+            for win in sorted(
+                (w for w in group if w["address"] not in assigned),
+                key=lambda w: w["start"] or 0,
+                reverse=True,
+            ):
+                start = win["start"]
+                if start is None:
+                    continue
+                best: Path | None = None
+                best_delta = 10.0
+                for path in unused:
+                    created = pi_session_created(path)
+                    if created is None:
+                        continue
+                    delta = abs(created - start)
+                    if delta < best_delta:
+                        best_delta = delta
+                        best = path
+                if best is None:
+                    continue
+                unused.discard(best)
+                assigned[win["address"]] = best
         ordered = sorted(
             (w for w in group if w["address"] not in assigned),
             key=lambda w: w["start"] or 0,
@@ -383,6 +457,19 @@ def message_text(obj: dict) -> str:
     return "\n".join(texts).strip()
 
 
+def message_role(obj: dict) -> str:
+    """Cursor puts role at top level; Pi nests it under type=message / message.role."""
+    role = obj.get("role")
+    if isinstance(role, str) and role:
+        return role
+    msg = obj.get("message")
+    if isinstance(msg, dict):
+        nested = msg.get("role")
+        if isinstance(nested, str):
+            return nested
+    return ""
+
+
 def scan_jsonl(jsonl: Path) -> tuple[str, str, bool]:
     """Last user query, last assistant fingerprint, whether the file ends on assistant."""
     query = ""
@@ -400,7 +487,7 @@ def scan_jsonl(jsonl: Path) -> tuple[str, str, bool]:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        role = obj.get("role")
+        role = message_role(obj)
         if role not in ("user", "assistant"):
             continue
         if not last_role:
@@ -410,6 +497,8 @@ def scan_jsonl(jsonl: Path) -> tuple[str, str, bool]:
             match = QUERY_RE.search(body)
             if match:
                 body = match.group(1).strip()
+            if not body:
+                continue
             query = one_line(body)
         elif role == "assistant" and not assistant_key:
             body = one_line(body)
@@ -549,6 +638,25 @@ def windows_from_hypr() -> list[dict]:
                     "start": proc_start(foot_pid),
                     "tdir": Path("/dev/null"),
                     "conv_id": None,
+                    "layout": "nested",
+                }
+            )
+            continue
+        if client.get("class") == PI_CLASS:
+            agent_pid, cwd = pi_pid_and_cwd(foot_pid)
+            if cwd is None:
+                continue
+            tdir = pi_sessions_dir_for(cwd)
+            if not tdir.is_dir():
+                continue
+            start = proc_start(agent_pid) if agent_pid else proc_start(foot_pid)
+            windows.append(
+                {
+                    "address": address,
+                    "tdir": tdir,
+                    "start": start,
+                    "conv_id": None,
+                    "layout": "flat",
                 }
             )
             continue
@@ -565,6 +673,7 @@ def windows_from_hypr() -> list[dict]:
                 "tdir": tdir,
                 "start": start,
                 "conv_id": conversation_id_for(foot_pid),
+                "layout": "nested",
             }
         )
     return windows

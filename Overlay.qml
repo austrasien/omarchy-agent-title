@@ -151,11 +151,15 @@ Item {
 
   function isAgentClass(winClass) {
     var c = String(winClass || "")
-    return c === "org.omarchy.agent" || c === "org.omarchy.agent.forge"
+    return c === "org.omarchy.agent" || c === "org.omarchy.agent.forge" || c === "org.omarchy.agent.pi"
   }
 
   function isForgeClass(winClass) {
     return String(winClass || "") === "org.omarchy.agent.forge"
+  }
+
+  function isPiClass(winClass) {
+    return String(winClass || "") === "org.omarchy.agent.pi"
   }
 
   function accentForClass(winClass) {
@@ -165,8 +169,13 @@ Item {
   function displayTitle(raw, winClass) {
     var t = String(raw || "").replace(/^\s+|\s+$/g, "")
     t = t.replace(/^(Working…|Working\.\.\.|Waiting for you|Waiting for confirmation|Ready)\s*[|–—-]\s*/i, "")
-    if (!t || t.toLowerCase() === "foot")
-      return overlayRoot.isForgeClass(winClass) ? "Cursor Forge" : "Cursor CLI"
+    if (!t || t.toLowerCase() === "foot") {
+      if (overlayRoot.isForgeClass(winClass))
+        return "Cursor Forge"
+      if (overlayRoot.isPiClass(winClass))
+        return "Pi"
+      return "Cursor CLI"
+    }
     return t
   }
 

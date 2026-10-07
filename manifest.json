@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "austraz.agent-title",
   "name": "Agent title",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "author": "austrasien",
   "license": "MIT",
-  "description": "Title bar on Cursor CLI windows showing the conversation subject Cursor already puts in the Foot window title.",
+  "description": "Title bar on Cursor CLI / Forge / Pi windows: conversation subject from the Foot title, plus last user query.",
   "kinds": [
     "overlay"
   ],

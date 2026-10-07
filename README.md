@@ -1,6 +1,6 @@
 # Agent title for Omarchy
 
-A **22 px overlay** on each Cursor CLI window (`org.omarchy.agent`): the **conversation subject** Cursor already writes into the Foot title (OSC), plus the last user query on the right.
+A **22 px overlay** on each Cursor CLI window (`org.omarchy.agent`), Cursor Forge CLI (`org.omarchy.agent.forge`), and Pi (`org.omarchy.agent.pi`): the **conversation subject** already in the Foot title (OSC), plus the last user query on the right.
 
 > **⚡ Built for Omarchy:** Quickshell overlay (`austraz.agent-title`). Cursor CLI has no in-TUI title bar (zen mode, composer at the bottom). Omarchy does not draw a Hyprland titlebar on that window. This fills the gap.
 
@@ -24,7 +24,7 @@ Got a question, found a bug, or have a suggestion? Open an [**issue**](https://g
 
 ## 🚀 Overview
 
-Omarchy launches Cursor CLI in Foot with class `org.omarchy.agent`, and Cursor Forge CLI with `org.omarchy.agent.forge`. The TUI is zen: no chrome, composer stuck at the bottom. The window title already carries the session name (`/rename`, or Cursor’s auto-name). This plugin reads Hyprland toplevels and draws a thin bar on each visible agent window. Forge titles use Catppuccin mauve `#cba6f7` instead of the current theme accent.
+Omarchy launches Cursor CLI in Foot with class `org.omarchy.agent`, Cursor Forge CLI with `org.omarchy.agent.forge`, and Pi with `org.omarchy.agent.pi`. Cursor’s TUI is zen: no chrome, composer stuck at the bottom. The window title already carries the session name (`/rename`, Cursor’s auto-name, or Pi’s `window-title.ts`). This plugin reads Hyprland toplevels and draws a thin bar on each visible agent window. Forge titles use Catppuccin mauve `#cba6f7` instead of the current theme accent. Empty Pi titles fall back to `Pi`.
 
 | | Without ❌ | With Agent title ✅ |
 | :--- | :--- | :--- |
@@ -38,11 +38,13 @@ Omarchy launches Cursor CLI in Foot with class `org.omarchy.agent`, and Cursor F
 
 ### 🏷 Subject from the Foot title
 - Strips Cursor’s `Working…` / `Waiting for confirmation` prefixes.
-- Empty or generic `foot` titles become `Cursor CLI`.
+- Empty or generic `foot` titles become `Cursor CLI`, `Cursor Forge`, or `Pi`.
 - Click the bar to focus that window.
 
-### 💬 Last `<user_query>`
-- `last-query.py` maps each Foot window to the conversation UUID `cursor-agent` has open (`store.db`), then the matching JSONL. A streaming CLI no longer steals another window’s last query.
+### 💬 Last user query
+- Cursor / Forge: `last-query.py` maps each Foot window to the conversation UUID `cursor-agent` has open (`store.db`), then the matching JSONL (strips `<user_query>` wrappers).
+- Pi: maps each Foot window to `~/.pi/agent/sessions/<cwd-slug>/*.jsonl` (filename timestamp ≈ `pi` start, else latest mtime after start).
+- A streaming CLI no longer steals another window’s last query.
 - Poll every 2 s; also on `windowtitlev2`.
 - Cache: `~/.local/state/omarchy/agent-title/queries.json`.
 
@@ -57,7 +59,7 @@ Omarchy launches Cursor CLI in Foot with class `org.omarchy.agent`, and Cursor F
 
 ## 🛠 Installation (Omarchy)
 
-**Requirements:** Omarchy Quattro shell (`omarchy-shell` / Quickshell), Hyprland, Cursor CLI in Foot with app-id `org.omarchy.agent`, Python 3.
+**Requirements:** Omarchy Quattro shell (`omarchy-shell` / Quickshell), Hyprland, agent CLIs in Foot (`org.omarchy.agent` / `.forge` / `.pi`), Python 3.
 
 ```sh
 omarchy plugin add https://github.com/austrasien/omarchy-agent-title.git --enable
